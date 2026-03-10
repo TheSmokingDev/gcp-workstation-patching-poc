@@ -1,0 +1,86 @@
+name: Deploy to Dev
+
+on:
+  pull_request:
+    paths:
+      - "users/dev/**/Dockerfile"
+      - "teams/dev/**/Dockerfile"
+
+jobs:
+  detect:
+    name: Detect changed Dockerfiles
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.detect.outputs.matrix }}
+      has_changes: ${{ steps.detect.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build matrix
+        id: detect
+        run: |
+          changed=$(git diff --name-only origin/${{ github.base_ref }}...HEAD \
+            | grep '^\(users\|teams\)/dev/[^/]*/[^/]*/Dockerfile$' || true)
+
+          if [ -z "$changed" ]; then
+            echo "matrix={\"include\":[]}" >> "$GITHUB_OUTPUT"
+            echo "has_changes=false"       >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          matrix=$(echo "$changed" \
+            | sed 's|/Dockerfile$||' \
+            | jq -Rsc '[split("\n")[] | select(length > 0) | {path: .}] | {include: .}')
+
+          echo "matrix=$matrix"  >> "$GITHUB_OUTPUT"
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: "Build ${{ matrix.path }}"
+    needs: detect
+    if: needs.detect.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    environment: dev
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect.outputs.matrix) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to dev GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.SERVICE_ACCOUNT }}
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker ${{ vars.DEV_REGISTRY }} --quiet
+
+      - name: Build, Harden & Push
+        id: build
+        uses: ./.github/actions/build-harden-push
+        with:
+          path: ${{ matrix.path }}
+          registry: ${{ vars.DEV_REGISTRY }}
+          image: ${{ vars.IMAGE }}
+          tag: pr-${{ github.event.pull_request.number }}
+
+      - name: Comment on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: [
+                `### ✅ Hardened image built for \`${{ matrix.path }}\``,
+                '```',
+                `docker pull ${{ steps.build.outputs.hardened_image }}`,
+                '```',
+              ].join('\n'),
+            });
