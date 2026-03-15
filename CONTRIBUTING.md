@@ -1,155 +1,151 @@
 # Contributing a Workstation Image
 
-This repo lets individuals and teams submit custom Docker images that get automatically built and hardened when you open a PR.
-
-## How it works
-
-1. You create a folder under `users/` (personal) or `teams/` (shared) and add a `Dockerfile`
-2. You open a PR
-3. CI builds your image, applies a mandatory hardening layer on top, and pushes it to Artifact Registry
-4. A bot comments the final image tag on your PR so you can pull and test it
+This repo lets individuals and teams submit custom workstation images that get automatically built and hardened when you open a PR.
 
 ---
 
 ## Personal images (`users/`)
 
-Images are organised by **environment first**, then your S-number, then image name. Place your Dockerfile in the environment you want to deploy to.
+You do not write a Dockerfile. Create a `config.json` under your S-number folder inside the platform image folder you want to build on. CI generates the Dockerfile from it.
 
 ```
 users/
-├── dev/
-│   └── s12345/              ← your S-number
-│       ├── r-geospatial/    ← image name (you choose)
-│       │   └── Dockerfile
-│       └── python-ml/
-│           └── Dockerfile
-├── preprod/
-│   └── s12345/
-│       └── r-geospatial/
-│           └── Dockerfile
-└── prod/
-    └── s12345/
-        └── r-geospatial/
-            └── Dockerfile
+└── {base-image}/          ← platform to build on: codeoss or rstudio
+    └── {snumber}/         ← your S-number (e.g. s12345)
+        └── config.json
 ```
 
-Branch name convention: `user/s12345/{env}/my-description`
+**Example:**
+```
+users/
+└── r-geospatial/
+    └── s12345/
+        └── config.json
+```
+
+The folder name after `users/` determines your base image — it must be `codeoss` or `rstudio`.
+
+**`config.json` schema:**
+
+```json
+{
+  "apt": ["libgdal-dev", "libproj-dev"]
+}
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `apt` | no | apt packages to install on top of the base image |
+
+**Base image options:**
+
+| Folder name | What's included |
+|---|---|
+| `codeoss` | Code OSS only |
+| `rstudio` | Code OSS + R + RStudio Server |
 
 ---
 
 ## Team images (`teams/`)
 
-Same structure as users — environment first, then team name, then image name.
+Teams can submit either a `config.json` (simple package installs) or a full `Dockerfile` (custom logic). Any team member can open a PR to add or update an image.
 
 ```
 teams/
-├── dev/
-│   └── data-science/        ← team name
-│       ├── base/
-│       │   └── Dockerfile
-│       └── gpu-workbench/
-│           └── Dockerfile
-├── preprod/
-│   └── data-science/
-│       └── base/
-│           └── Dockerfile
-└── prod/
-    └── data-science/
-        └── base/
-            └── Dockerfile
+└── {team-name}/           ← your team name (e.g. data-science)
+    └── {image-name}/      ← image name (you choose)
+        └── config.json    ← or Dockerfile
 ```
 
-Branch name convention: `team/data-science/{env}/my-description`
+**Option A — config.json (recommended for package-only images)**
 
-Team folders are shared — coordinate with your team before making changes to an existing image.
+Same approach as personal images, but `base` is required since it cannot be derived from the path:
+
+```json
+{
+  "base": "rstudio",
+  "apt":  ["libgdal-dev", "libproj-dev"]
+}
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `base` | **yes** | Platform image to build on: `codeoss` or `rstudio` |
+| `apt` | no | apt packages to install |
+
+**Option B — Dockerfile (for custom logic)**
+
+```
+teams/
+└── data-science/
+    └── gpu-workbench/
+        └── Dockerfile
+```
+
+Team Dockerfiles must follow the [compatibility prerequisites](#prerequisites-for-team-dockerfiles) below.
 
 ---
 
 ## Steps
 
-### 1. Create your Dockerfile
+### 1. Create your file(s)
 
-Image names must be lowercase and may only contain letters, digits, and hyphens (`-`).
+- **Users:** create `users/{image-name}/{snumber}/config.json`
+- **Teams:** create `teams/{team-name}/{image-name}/config.json` or `teams/{team-name}/{image-name}/Dockerfile`
 
-Your `Dockerfile` must start `FROM` a base image. The recommended starting point is a published platform image from this repo:
-
-```dockerfile
-FROM us-central1-docker.pkg.dev/my-project/workstation-images/codeoss:codeoss-locked--rstudio-locked
-
-# your additions below
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends my-tool && \
-    rm -rf /var/lib/apt/lists/*
-```
-
-Available platform tags:
-
-| Tag | Code OSS downloads | RStudio downloads |
-|---|---|---|
-| `codeoss-locked--rstudio-locked` | blocked | blocked |
-| `codeoss-locked--rstudio-open` | blocked | allowed |
-| `codeoss-open--rstudio-locked` | allowed | blocked |
-| `codeoss-open--rstudio-open` | allowed | allowed |
-
-You can use any base image, but images not derived from the project base will still have the hardening layer applied on top.
+Folder and image names must be lowercase and may only contain letters, digits, and hyphens (`-`).
 
 ### 2. Open a pull request
 
-- Only change files inside your own folder (`users/<your-snumber>/` or `teams/<your-team>/`)
-- PRs that touch files outside your folder will be rejected
-- Multiple Dockerfiles in one PR are supported — each gets its own parallel build
+- Branch convention (users): `user/{snumber}/{image-name}`
+- Branch convention (teams): `team/{team-name}/{image-name}`
+- Only change files inside your own folder
+- Multiple images in one PR are supported — each builds in parallel
 
 ### 3. Wait for CI
 
-The pipeline that runs depends on which environment folder your Dockerfile is in:
+On PR open, the relevant pipeline runs automatically:
 
-| Folder | Workflow | Registry |
-|---|---|---|
-| `users/dev/**` or `teams/dev/**` | `deploy-dev.yml` | `DEV_REGISTRY` |
-| `users/preprod/**` or `teams/preprod/**` | `deploy-preprod.yml` | `PREPROD_REGISTRY` |
-| `users/prod/**` or `teams/prod/**` | `deploy-prod.yml` | `PROD_REGISTRY` (requires reviewer approval) |
+| What changed | Workflow |
+|---|---|
+| `users/**/config.json` | `deploy-users.yml` |
+| `teams/**/Dockerfile` | `deploy-teams.yml` |
 
 Each pipeline:
-1. Detects changed Dockerfiles in your PR
-2. Builds each one for `linux/amd64`
-3. Applies the mandatory hardening layer via the shared `build-harden-push` action
-4. Pushes the hardened image to the environment's Artifact Registry
-5. Comments the image tag on your PR
+1. Detects all changed files in the PR
+2. Builds each image for `linux/amd64`
+3. Applies the mandatory hardening layer
+4. Pushes the hardened image to Artifact Registry
+5. Comments the pull image command on your PR
 
 Example bot comment:
-
 ```
-### ✅ Hardened image built for `teams/dev/data-science/base`
-docker pull us-central1-docker.pkg.dev/my-dev-project/workstation-images/codeoss/teams/dev/data-science/base:pr-42-hardened
+### ✅ Image built for `users/r-geospatial/s12345`
+docker pull us-central1-docker.pkg.dev/my-project/workstation-images/codeoss/users/r-geospatial/s12345:pr-42-hardened
 ```
 
 ### 4. Pull and verify
 
 ```bash
-docker pull us-central1-docker.pkg.dev/my-dev-project/workstation-images/codeoss/users/dev/s12345/r-geospatial:pr-42-hardened
+docker pull <image-from-bot-comment>
 docker run --rm -it <image> bash
 ```
 
 ---
 
-## Prerequisites for compatibility with the base image
+## Prerequisites for team Dockerfiles
 
-The platform Dockerfile lives in [`platform/Dockerfile`](platform/Dockerfile). It is built by CI and published to Artifact Registry — you do not need to modify it.
+The base images are Ubuntu Noble (`linux/amd64`). Your Dockerfile must start `FROM` one of the published platform images:
 
-The base image is Ubuntu Noble (`linux/amd64`) and runs two services at startup:
+```dockerfile
+FROM us-central1-docker.pkg.dev/my-project/workstation-images/codeoss/rstudio:codeoss-locked--rstudio-locked
 
-| Service | Port | Startup script |
-|---|---|---|
-| Code OSS (VS Code) | 80 | managed by the base image |
-| RStudio Server | 8787 | `/etc/workstation-startup.d/210_start-rstudio.sh` |
-
-Your `Dockerfile` must meet the following requirements to stay compatible:
+# your additions here
+```
 
 **Package management**
-- Use `apt-get` (Debian/Ubuntu). Do not use `yum`, `dnf`, `apk`, or other package managers.
-- Always pair `apt-get update` with your `apt-get install` in the same `RUN` step.
-- Always append `&& rm -rf /var/lib/apt/lists/*` to keep the image lean.
-- Always use `--no-install-recommends`.
+- Use `apt-get` only. Do not use `yum`, `dnf`, `apk`, or others.
+- Always pair `apt-get update` with `install` in the same `RUN` step and clean up after.
 
 ```dockerfile
 RUN apt-get update && \
@@ -158,50 +154,43 @@ RUN apt-get update && \
 ```
 
 **User context**
-- The container runs as `user` (non-root). Your additions should work under this user.
-- Do not add `USER root` without switching back, and do not add `USER 0`.
-- Do not add your user to sudoers — `sudo` is removed by the hardening layer.
+- The container runs as `user` (non-root).
+- Do not add `USER root` without switching back. Do not add to sudoers — `sudo` is removed by the hardening layer.
 
 **Startup scripts**
-- Startup scripts live in `/etc/workstation-startup.d/` and run in filename order at boot.
-- Do not delete or overwrite existing scripts (`100_*`, `210_*`).
-- If you need to run something at startup, add a new script with a unique prefix, e.g. `220_my-tool.sh`.
+- Scripts in `/etc/workstation-startup.d/` run in filename order at boot.
+- Do not overwrite existing scripts (`100_*`, `210_*`).
+- Add your own with a unique prefix, e.g. `220_my-tool.sh`.
 
-**Ports**
-- Ports 80 and 8787 are reserved. Do not bind any service to these ports.
+**Ports** — 80 and 8787 are reserved.
 
-**Architecture**
-- Images are built for `linux/amd64` only. Do not use base images or binaries that are `arm64`-only.
+**Architecture** — `linux/amd64` only.
 
-**Layer hygiene**
-- Do not `COPY` or `ADD` large binary blobs — install from apt or a verified release URL.
-- Do not embed credentials, tokens, or `.env` files in any layer.
+**Layer hygiene** — no binary blobs, no credentials, no `.env` files in any layer.
 
 ---
 
 ## Rules
 
-- **One folder per person / team.** User folders must be named `s` + digits (e.g. `s12345`). Team folders use a lowercase hyphenated name (e.g. `data-science`).
 - **Only modify your own folder.** PRs touching files outside your folder will be rejected.
-- **No privilege escalation.** Do not install `sudo`, add capabilities, or modify `/etc/sudoers`. The hardening layer removes these regardless, but PRs containing them will be flagged for review.
-- **No secrets in the Dockerfile.** Do not embed passwords, tokens, or credentials. Use Secret Manager at runtime.
-- **Images must build for `linux/amd64`.**
+- **No privilege escalation.** Do not install `sudo` or modify `/etc/sudoers`. The hardening layer removes it regardless.
+- **No secrets.** Do not embed passwords, tokens, or credentials. Use Secret Manager at runtime.
 
 ---
 
 ## What the hardening layer applies
 
-Applied automatically on top of every image — you do not need to do this yourself:
+Applied automatically on top of every image:
 
 | Step | Detail |
 |---|---|
-| OS security patches | `apt-get upgrade` for all available CVE fixes |
+| OS security patches | `apt-get upgrade` for all CVE fixes |
 | Package removal | `sudo`, `gdebi-core`, `dirmngr`, `software-properties-common` removed |
-| sudo disabled | Binary removed and sudoers drop-in added as belt-and-suspenders |
+| sudo disabled | Binary removed + sudoers drop-in as belt-and-suspenders |
 | SUID/SGID strip | Setuid bits removed from non-essential binaries |
 | Restrictive umask | `umask 027` — new files default to `640` |
-| Core dumps disabled | Hard/soft core limit set to 0, `suid_dumpable=0` |
-| iptables egress | Outbound restricted to DNS + HTTP/S only (requires `NET_ADMIN` cap at runtime) |
+| Core dumps disabled | Hard/soft core limit 0, `suid_dumpable=0` |
+| iptables egress | Outbound restricted to DNS + HTTP/S (requires `NET_ADMIN` cap at runtime) |
 
 ---
 

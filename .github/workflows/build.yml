@@ -1,32 +1,26 @@
-name: Build & Promote Platform Images
+name: Build Platform Images
 
-# Triggered on push to main or manually.
-# Promotion flow: dev → preprod → prod
+# Builds platform/codeoss and platform/rstudio across all download-blocking
+# combinations and pushes to dev Artifact Registry.
 #
 # GitHub Environment setup required:
-#   Each environment (dev, preprod, prod) must define:
+#   Environment: dev
 #     Secrets:  WIF_PROVIDER, SERVICE_ACCOUNT
 #   Repository-level variables (Settings > Variables):
-#     DEV_REGISTRY     e.g. us-central1-docker.pkg.dev/my-dev-project/workstation-images
-#     PREPROD_REGISTRY e.g. us-central1-docker.pkg.dev/my-preprod-project/workstation-images
-#     PROD_REGISTRY    e.g. us-central1-docker.pkg.dev/my-prod-project/workstation-images
-#     IMAGE            e.g. codeoss
-#
-# GCP IAM setup required:
-#   preprod SERVICE_ACCOUNT → roles/artifactregistry.reader on dev registry
-#   prod    SERVICE_ACCOUNT → roles/artifactregistry.reader on preprod registry
+#     DEV_REGISTRY  e.g. us-central1-docker.pkg.dev/my-dev-project/workstation-images
+#     IMAGE         e.g. codeoss
 
 on:
   push:
     branches: [main]
     paths:
-      - "platform/Dockerfile"
+      - "platform/codeoss/Dockerfile"
+      - "platform/rstudio/Dockerfile"
   workflow_dispatch:
 
 jobs:
-  # ── 1. Build & push to dev ─────────────────────────────────────────────────
   build:
-    name: "Build [${{ matrix.tag }}] → dev"
+    name: "[${{ matrix.platform }}:${{ matrix.tag }}]"
     runs-on: ubuntu-latest
     environment: dev
 
@@ -34,119 +28,73 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - block_codeoss: "true"
+          # ── codeoss variants ─────────────────────────────────────
+          - platform: codeoss
+            context: platform/codeoss
+            block_codeoss: "true"
             block_rstudio: "true"
             tag: codeoss-locked--rstudio-locked
-          - block_codeoss: "true"
+          - platform: codeoss
+            context: platform/codeoss
+            block_codeoss: "true"
             block_rstudio: "false"
             tag: codeoss-locked--rstudio-open
-          - block_codeoss: "false"
+          - platform: codeoss
+            context: platform/codeoss
+            block_codeoss: "false"
             block_rstudio: "true"
             tag: codeoss-open--rstudio-locked
-          - block_codeoss: "false"
+          - platform: codeoss
+            context: platform/codeoss
+            block_codeoss: "false"
+            block_rstudio: "false"
+            tag: codeoss-open--rstudio-open
+          # ── rstudio variants ─────────────────────────────────────
+          - platform: rstudio
+            context: platform/rstudio
+            block_codeoss: "true"
+            block_rstudio: "true"
+            tag: codeoss-locked--rstudio-locked
+          - platform: rstudio
+            context: platform/rstudio
+            block_codeoss: "true"
+            block_rstudio: "false"
+            tag: codeoss-locked--rstudio-open
+          - platform: rstudio
+            context: platform/rstudio
+            block_codeoss: "false"
+            block_rstudio: "true"
+            tag: codeoss-open--rstudio-locked
+          - platform: rstudio
+            context: platform/rstudio
+            block_codeoss: "false"
             block_rstudio: "false"
             tag: codeoss-open--rstudio-open
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Authenticate to dev GCP
+      - name: Authenticate to GCP
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.SERVICE_ACCOUNT }}
 
-      - name: Configure Docker for dev Artifact Registry
+      - name: Configure Docker
         run: gcloud auth configure-docker ${{ vars.DEV_REGISTRY }} --quiet
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push to dev
+      - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: platform
+          context: ${{ matrix.context }}
           push: true
           platforms: linux/amd64
-          tags: ${{ vars.DEV_REGISTRY }}/${{ vars.IMAGE }}:${{ matrix.tag }}
+          tags: ${{ vars.DEV_REGISTRY }}/${{ vars.IMAGE }}/${{ matrix.platform }}:${{ matrix.tag }}
           build-args: |
             BLOCK_CODEOSS_DOWNLOADS=${{ matrix.block_codeoss }}
             BLOCK_RSTUDIO_DOWNLOADS=${{ matrix.block_rstudio }}
-          cache-from: type=registry,ref=${{ vars.DEV_REGISTRY }}/${{ vars.IMAGE }}:buildcache
-          cache-to: type=registry,ref=${{ vars.DEV_REGISTRY }}/${{ vars.IMAGE }}:buildcache,mode=max
-
-  # ── 2. Promote dev → preprod ───────────────────────────────────────────────
-  promote-preprod:
-    name: "Promote [${{ matrix.tag }}] → preprod"
-    needs: build
-    runs-on: ubuntu-latest
-    environment: preprod
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - tag: codeoss-locked--rstudio-locked
-          - tag: codeoss-locked--rstudio-open
-          - tag: codeoss-open--rstudio-locked
-          - tag: codeoss-open--rstudio-open
-
-    steps:
-      - name: Authenticate to preprod GCP
-        # This service account must have artifactregistry.reader on the dev registry.
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
-          service_account: ${{ secrets.SERVICE_ACCOUNT }}
-
-      - name: Install crane
-        uses: imjasonh/setup-crane@v0.4
-
-      - name: Configure crane auth for both registries
-        run: |
-          gcloud auth configure-docker ${{ vars.DEV_REGISTRY }} --quiet
-          gcloud auth configure-docker ${{ vars.PREPROD_REGISTRY }} --quiet
-
-      - name: Copy image from dev to preprod
-        run: |
-          crane copy \
-            ${{ vars.DEV_REGISTRY }}/${{ vars.IMAGE }}:${{ matrix.tag }} \
-            ${{ vars.PREPROD_REGISTRY }}/${{ vars.IMAGE }}:${{ matrix.tag }}
-
-  # ── 3. Promote preprod → prod ──────────────────────────────────────────────
-  promote-prod:
-    name: "Promote [${{ matrix.tag }}] → prod"
-    needs: promote-preprod
-    runs-on: ubuntu-latest
-    environment: prod   # ← configure required reviewers here in GitHub settings
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - tag: codeoss-locked--rstudio-locked
-          - tag: codeoss-locked--rstudio-open
-          - tag: codeoss-open--rstudio-locked
-          - tag: codeoss-open--rstudio-open
-
-    steps:
-      - name: Authenticate to prod GCP
-        # This service account must have artifactregistry.reader on the preprod registry.
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
-          service_account: ${{ secrets.SERVICE_ACCOUNT }}
-
-      - name: Install crane
-        uses: imjasonh/setup-crane@v0.4
-
-      - name: Configure crane auth for both registries
-        run: |
-          gcloud auth configure-docker ${{ vars.PREPROD_REGISTRY }} --quiet
-          gcloud auth configure-docker ${{ vars.PROD_REGISTRY }} --quiet
-
-      - name: Copy image from preprod to prod
-        run: |
-          crane copy \
-            ${{ vars.PREPROD_REGISTRY }}/${{ vars.IMAGE }}:${{ matrix.tag }} \
-            ${{ vars.PROD_REGISTRY }}/${{ vars.IMAGE }}:${{ matrix.tag }}
+          cache-from: type=registry,ref=${{ vars.DEV_REGISTRY }}/${{ vars.IMAGE }}/${{ matrix.platform }}:buildcache
+          cache-to: type=registry,ref=${{ vars.DEV_REGISTRY }}/${{ vars.IMAGE }}/${{ matrix.platform }}:buildcache,mode=max

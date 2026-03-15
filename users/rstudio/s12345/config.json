@@ -1,0 +1,3 @@
+{
+  "apt": ["libgdal-dev", "libproj-dev", "libgeos-dev"]
+}

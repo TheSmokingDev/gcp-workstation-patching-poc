@@ -1,10 +1,12 @@
-name: Deploy to Dev
+name: Deploy Team Images
 
 on:
-  pull_request:
+  push:
+    branches:
+      - main
     paths:
-      - "users/dev/**/Dockerfile"
-      - "teams/dev/**/Dockerfile"
+      - "teams/**/Dockerfile"
+      - "teams/**/config.json"
 
 jobs:
   detect:
@@ -21,8 +23,12 @@ jobs:
       - name: Build matrix
         id: detect
         run: |
-          changed=$(git diff --name-only origin/${{ github.base_ref }}...HEAD \
-            | grep '^\(users\|teams\)/dev/[^/]*/[^/]*/Dockerfile$' || true)
+          # Pattern: teams/{team-name}/{image}/Dockerfile or config.json
+          changed=$(git diff --name-only HEAD~1...HEAD \
+            | grep -E '^teams/[^/]*/[^/]*/(Dockerfile|config\.json)$' \
+            | sed -E 's|/(Dockerfile|config\.json)$||' \
+            | sort -u \
+            || true)
 
           if [ -z "$changed" ]; then
             echo "matrix={\"include\":[]}" >> "$GITHUB_OUTPUT"
@@ -31,10 +37,9 @@ jobs:
           fi
 
           matrix=$(echo "$changed" \
-            | sed 's|/Dockerfile$||' \
             | jq -Rsc '[split("\n")[] | select(length > 0) | {path: .}] | {include: .}')
 
-          echo "matrix=$matrix"  >> "$GITHUB_OUTPUT"
+          echo "matrix=$matrix"   >> "$GITHUB_OUTPUT"
           echo "has_changes=true" >> "$GITHUB_OUTPUT"
 
   build:
@@ -51,7 +56,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Authenticate to dev GCP
+      - name: Authenticate to GCP
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
@@ -78,7 +83,7 @@ jobs:
               repo: context.repo.repo,
               issue_number: context.issue.number,
               body: [
-                `### ✅ Hardened image built for \`${{ matrix.path }}\``,
+                `### ✅ Image built for \`${{ matrix.path }}\``,
                 '```',
                 `docker pull ${{ steps.build.outputs.hardened_image }}`,
                 '```',

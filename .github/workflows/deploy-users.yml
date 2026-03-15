@@ -1,14 +1,15 @@
-name: Deploy to Prod
+name: Deploy User Images
 
 on:
-  pull_request:
+  push:
+    branches:
+      - main
     paths:
-      - "users/prod/**/Dockerfile"
-      - "teams/prod/**/Dockerfile"
+      - "users/**/config.json"
 
 jobs:
   detect:
-    name: Detect changed Dockerfiles
+    name: Detect changed configs
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.detect.outputs.matrix }}
@@ -21,8 +22,9 @@ jobs:
       - name: Build matrix
         id: detect
         run: |
-          changed=$(git diff --name-only origin/${{ github.base_ref }}...HEAD \
-            | grep '^\(users\|teams\)/prod/[^/]*/[^/]*/Dockerfile$' || true)
+          # Pattern: users/{image}/{snumber}/config.json
+          changed=$(git diff --name-only HEAD~1...HEAD \
+            | grep '^users/[^/]*/[^/]*/config\.json$' || true)
 
           if [ -z "$changed" ]; then
             echo "matrix={\"include\":[]}" >> "$GITHUB_OUTPUT"
@@ -31,10 +33,10 @@ jobs:
           fi
 
           matrix=$(echo "$changed" \
-            | sed 's|/Dockerfile$||' \
+            | sed 's|/config\.json$||' \
             | jq -Rsc '[split("\n")[] | select(length > 0) | {path: .}] | {include: .}')
 
-          echo "matrix=$matrix"  >> "$GITHUB_OUTPUT"
+          echo "matrix=$matrix"   >> "$GITHUB_OUTPUT"
           echo "has_changes=true" >> "$GITHUB_OUTPUT"
 
   build:
@@ -42,7 +44,7 @@ jobs:
     needs: detect
     if: needs.detect.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
-    environment: prod   # configure required reviewers in GitHub Settings → Environments → prod
+    environment: dev
 
     strategy:
       fail-fast: false
@@ -51,21 +53,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Authenticate to prod GCP
+      - name: Authenticate to GCP
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.SERVICE_ACCOUNT }}
 
       - name: Configure Docker
-        run: gcloud auth configure-docker ${{ vars.PROD_REGISTRY }} --quiet
+        run: gcloud auth configure-docker ${{ vars.DEV_REGISTRY }} --quiet
 
       - name: Build, Harden & Push
         id: build
         uses: ./.github/actions/build-harden-push
         with:
           path: ${{ matrix.path }}
-          registry: ${{ vars.PROD_REGISTRY }}
+          registry: ${{ vars.DEV_REGISTRY }}
           image: ${{ vars.IMAGE }}
           tag: pr-${{ github.event.pull_request.number }}
 
@@ -78,7 +80,7 @@ jobs:
               repo: context.repo.repo,
               issue_number: context.issue.number,
               body: [
-                `### ✅ Hardened image built for \`${{ matrix.path }}\``,
+                `### ✅ Image built for \`${{ matrix.path }}\``,
                 '```',
                 `docker pull ${{ steps.build.outputs.hardened_image }}`,
                 '```',
